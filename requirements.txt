@@ -1,0 +1,6 @@
+streamlit
+pandas
+plotly
+st-gsheets-connection
+python-dateutil
+streamlit-authenticator
