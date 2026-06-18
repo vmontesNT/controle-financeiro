@@ -205,10 +205,11 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
     grupos_ativos_ids = df_membros[(df_membros['email_usuario'] == email_logado) & (df_membros['status'] == 'Ativo')]['id_grupo'].tolist()
     grupos_ativos_df = df_grupos[df_grupos['id_grupo'].isin(grupos_ativos_ids)]
 
+    # ARQUITETURA CORRIGIDA: O 'Tipo' sai do formulário para forçar a atualização da tela em tempo real
+    tipo_selecionado = st.radio("Tipo da Movimentação:", TIPOS_LANCAMENTO, horizontal=True)
+    tipo = tipo_selecionado.split(" ")[1]
+
     with st.form("form_lancamento", clear_on_submit=True):
-        tipo_selecionado = st.radio("Tipo:", TIPOS_LANCAMENTO, horizontal=True)
-        tipo = tipo_selecionado.split(" ")[1]
-        
         col_escopo, col_grupo = st.columns(2)
         with col_escopo:
             escopo = st.radio("De onde saiu/entrou este dinheiro?", ["👤 Meu Dinheiro (Privado)", "🏠 Dinheiro da Casa (Cofre Compartilhado)"])
@@ -232,7 +233,7 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
         
         col1, col2, col3 = st.columns(3)
         with col1: valor = st.number_input("Valor Total (R$)", min_value=0.01, format="%.2f")
-        with col2: data_compra = st.date_input("Data do Ocorrido", format="DD/MM/YYYY")
+        with col2: data_compra = st.date_input("Data do Ocorrido", format="DD/MM/YYYY") # Mantendo o ajuste BR que fizemos
         with col3: parcelas = st.number_input("Dividir em Parcelas?", min_value=1, max_value=48, value=1)
         
         if st.form_submit_button("Salvar Registro", use_container_width=True):
