@@ -1,7 +1,10 @@
 import uuid
+import string
+import random
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from streamlit_gsheets import GSheetsConnection
@@ -10,49 +13,88 @@ import streamlit_authenticator as stauth
 # ==========================================
 # CONFIGURAÇÕES DA PÁGINA E CONSTANTES
 # ==========================================
-st.set_page_config(page_title="Nosso Controle", page_icon="💰", layout="centered")
+st.set_page_config(page_title="Finanças em Família", page_icon="💰", layout="wide")
 
-# Novas Listas de Categorias
-TIPOS_LANCAMENTO = ["🔴 Despesa (Gastei)", "🟢 Receita (Ganhei)", "🔵 Reserva (Guardei)"]
-CATEGORIAS_DESPESA = ["Mercado", "Farmácia", "Casa", "Lazer", "Contas Fixas (Água/Luz)", "Empréstimo (Para Alguém)", "Outros"]
-CATEGORIAS_RECEITA = ["Salário", "Freelance / Bicos", "Pagamento de Empréstimo (Recebi)", "Rendimentos", "Outros"]
+TIPOS_LANCAMENTO = ["🔴 Despesa", "🟢 Receita", "🔵 Reserva"]
+CATEGORIAS_DESPESA = ["Mercado", "Farmácia", "Casa", "Lazer", "Contas Fixas", "Outros"]
+CATEGORIAS_RECEITA = ["Salário", "Freelance", "Rendimentos", "Outros"]
 
-# ATENÇÃO: Nova coluna 'tipo' adicionada na 3ª posição
-COLUNAS_LANCAMENTOS = ["id", "email", "tipo", "descricao", "valor", "data", "parcela_atual", "total_parcelas", "categoria"]
-COLUNAS_USUARIOS = ["username", "email", "nome", "senha_hash", "compartilhado_com"]
+COLUNAS_USUARIOS = ["email", "username", "nome", "senha_hash", "is_admin"]
+COLUNAS_GRUPOS = ["id_grupo", "nome_grupo", "email_criador", "data_criacao"]
+COLUNAS_MEMBROS = ["id_grupo", "email_usuario", "status"]
+COLUNAS_LANCAMENTOS = [
+    "id_transacao", "email_usuario", "tipo", "escopo", "id_grupo",
+    "descricao", "valor", "data", "parcela_atual", "total_parcelas", "categoria"
+]
 
 # ==========================================
-# CAMADA DE DADOS E CONEXÃO
+# CAMADA DE DADOS E CONEXÃO (I/O)
 # ==========================================
 @st.cache_resource
 def get_connection() -> GSheetsConnection:
     return st.connection("gsheets", type=GSheetsConnection)
 
-def carregar_tabela(conn: GSheetsConnection, nome_aba: str, colunas: list) -> pd.DataFrame:
+@st.cache_data(ttl=3600)
+def carregar_tabela(_conn: GSheetsConnection, nome_aba: str, colunas: list) -> pd.DataFrame:
+    """Carrega dados da planilha e faz o cache na memória para evitar Rate Limit."""
     try:
-        df = conn.read(worksheet=nome_aba, usecols=list(range(len(colunas))))
+        df = _conn.read(worksheet=nome_aba, usecols=list(range(len(colunas))))
         if df.empty or len(df.columns) == 0:
             return pd.DataFrame(columns=colunas)
-        
-        if 'compartilhado_com' in df.columns:
-            df['compartilhado_com'] = df['compartilhado_com'].fillna("")
-            
         return df
     except Exception as e:
-        st.error(f"Erro ao carregar a aba {nome_aba}. Detalhe técnico: {e}")
+        st.error(f"Erro ao carregar a aba {nome_aba}: {e}")
         return pd.DataFrame(columns=colunas)
 
 def salvar_dados(conn: GSheetsConnection, df: pd.DataFrame, nome_aba: str) -> None:
+    """Atualiza a aba no Google Sheets e limpa o cache global de forma defensiva."""
     try:
         conn.update(worksheet=nome_aba, data=df)
-        st.cache_data.clear() # Invalida o cache
+        st.cache_data.clear()  # Invalidação total para garantir consistência entre abas
     except Exception as e:
-        st.error(f"Erro ao salvar informações: {e}")
+        st.error(f"Erro crítico ao salvar em {nome_aba}: {e}")
 
 # ==========================================
-# LÓGICA DE NEGÓCIO E COMPONENTES
+# LÓGICA DE NEGÓCIO E SEGURANÇA (CORE)
+# ==========================================
+def aplicar_rls(df_lancamentos: pd.DataFrame, df_membros: pd.DataFrame, email_logado: str) -> pd.DataFrame:
+    """
+    Row-Level Security (RLS) Vetorizado:
+    Filtra as transações baseando-se no escopo (Privado vs Grupo) e nos grupos que o usuário participa.
+    """
+    if df_lancamentos.empty:
+        return df_lancamentos
+
+    # 1. Identificar grupos ativos do usuário
+    grupos_ativos = df_membros[
+        (df_membros['email_usuario'] == email_logado) & 
+        (df_membros['status'] == 'Ativo')
+    ]['id_grupo'].tolist()
+
+    # 2. Máscara Booleana de Segurança
+    mascara = (
+        (df_lancamentos['email_usuario'] == email_logado) |  # Meus registros (Privados ou Grupos que criei/lancei)
+        ((df_lancamentos['escopo'] == 'Grupo') & (df_lancamentos['id_grupo'].isin(grupos_ativos))) # Da casa
+    )
+    
+    df_seguro = df_lancamentos[mascara].copy()
+    
+    # Casting e Limpeza de Dados
+    df_seguro['data'] = pd.to_datetime(df_seguro['data'], errors='coerce')
+    df_seguro['valor'] = pd.to_numeric(df_seguro['valor'], errors='coerce').fillna(0.0)
+    
+    return df_seguro
+
+def gerar_senha_aleatoria(tamanho=8) -> str:
+    """Gera uma senha temporária alfanumérica."""
+    caracteres = string.ascii_letters + string.digits
+    return ''.join(random.choice(caracteres) for i in range(tamanho))
+
+# ==========================================
+# COMPONENTES DE UI (ABAS)
 # ==========================================
 def registrar_novo_usuario(conn: GSheetsConnection, df_usuarios: pd.DataFrame):
+    """Renderiza o formulário de cadastro e salva o novo usuário com is_admin='NAO'."""
     with st.expander("🆕 Não tem uma conta? Cadastre-se aqui"):
         with st.form("form_registro", clear_on_submit=True):
             novo_nome = st.text_input("Qual o seu nome?")
@@ -76,242 +118,328 @@ def registrar_novo_usuario(conn: GSheetsConnection, df_usuarios: pd.DataFrame):
                     st.error("❌ E-mail já cadastrado.")
                     return
                 
+                # Gera o hash da senha
                 credenciais_temp = {"usernames": {"temp": {"password": nova_senha}}}
                 stauth.Hasher.hash_passwords(credenciais_temp)
                 senha_criptografada = credenciais_temp["usernames"]["temp"]["password"]
                 
+                # Insere o novo usuário seguindo a nova modelagem de dados
                 novo_registro = pd.DataFrame([{
-                    "username": novo_username, "email": novo_email, "nome": novo_nome,
-                    "senha_hash": senha_criptografada, "compartilhado_com": ""
+                    "email": novo_email, 
+                    "username": novo_username, 
+                    "nome": novo_nome,
+                    "senha_hash": senha_criptografada, 
+                    "is_admin": "NAO"  # Padrão de segurança crítico
                 }])
+                
                 df_final = pd.concat([df_usuarios, novo_registro], ignore_index=True)
                 salvar_dados(conn, df_final, "Usuarios")
                 st.success("✅ Conta criada! Você já pode fazer login.")
                 st.rerun()
 
-def calcular_parcelas(email: str, tipo: str, descricao: str, valor_total: float, 
-                      data_compra: date, parcelas: int, categoria: str) -> pd.DataFrame:
-    registros = []
-    valor_parcela = round(valor_total / parcelas, 2)
-    for i in range(parcelas):
-        data_parcela = data_compra + relativedelta(months=i)
-        registros.append({
-            "id": str(uuid.uuid4()), "email": email, "tipo": tipo,
-            "descricao": f"{descricao} (Parcela {i+1} de {parcelas})" if parcelas > 1 else descricao,
-            "valor": valor_parcela, "data": data_parcela,
-            "parcela_atual": i + 1, "total_parcelas": parcelas, "categoria": categoria
-        })
-    return pd.DataFrame(registros)
+def renderizar_aba_admin(conn, df_usuarios):
+    st.markdown("### 🛠️ Painel de Administração")
+    st.info("Apenas usuários com `is_admin = SIM` na planilha visualizam esta aba.")
+    
+    st.write("#### Redefinir Senha de Usuários")
+    usuario_selecionado = st.selectbox("Selecione o usuário:", df_usuarios['email'].tolist())
+    
+    if st.button("Gerar Nova Senha", type="primary"):
+        nova_senha = gerar_senha_aleatoria()
+        
+        # Hash da nova senha
+        credenciais_temp = {"usernames": {"temp": {"password": nova_senha}}}
+        stauth.Hasher.hash_passwords(credenciais_temp)
+        senha_hash = credenciais_temp["usernames"]["temp"]["password"]
+        
+        # Atualiza o DataFrame
+        idx = df_usuarios.index[df_usuarios['email'] == usuario_selecionado].tolist()[0]
+        df_usuarios.at[idx, 'senha_hash'] = senha_hash
+        
+        salvar_dados(conn, df_usuarios, "Usuarios")
+        st.success(f"✅ Senha alterada com sucesso!")
+        st.warning(f"Envie esta senha temporária para o usuário: **{nova_senha}**")
 
-def renderizar_aba_lancamento(conn: GSheetsConnection, df_atual: pd.DataFrame, email_usuario: str):
-    st.markdown("### 📝 O que vamos anotar hoje?")
+def renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado):
+    st.markdown("### 🏠 Minha Família e Grupos")
     
-    # Seleção Dinâmica do Tipo de Lançamento
-    tipo_selecionado = st.radio("Selecione o tipo:", TIPOS_LANCAMENTO, horizontal=True)
-    tipo_limpo = tipo_selecionado.split(" ")[1] # Extrai apenas "Despesa", "Receita" ou "Reserva"
+    col1, col2 = st.columns(2)
     
-    with st.form("form_novo_gasto", clear_on_submit=True):
-        descricao = st.text_input("Qual a descrição?", placeholder="Ex: Salário, Supermercado, Poupança...")
+    with col1:
+        st.write("#### 📥 Convites Pendentes")
+        pendentes = df_membros[(df_membros['email_usuario'] == email_logado) & (df_membros['status'] == 'Pendente')]
         
-        # Filtra as categorias com base no tipo
-        if tipo_limpo == "Despesa":
-            categoria = st.selectbox("Categoria", CATEGORIAS_DESPESA)
-        elif tipo_limpo == "Receita":
-            categoria = st.selectbox("Categoria", CATEGORIAS_RECEITA)
+        if pendentes.empty:
+            st.write("Nenhum convite pendente.")
         else:
-            categoria = st.selectbox("Categoria", ["Reserva de Emergência"])
-            
-        col1, col2 = st.columns(2)
-        with col1: valor = st.number_input("Valor total (R$)", min_value=0.01, format="%.2f")
-        with col2: data_compra = st.date_input("Data")
-            
-        # Reservas raramente são parceladas, mas deixamos a opção livre
-        parcelas = st.number_input("Dividir em quantas vezes?", min_value=1, max_value=48, value=1)
-        submit = st.form_submit_button("Salvar Registro", use_container_width=True)
+            for idx, row in pendentes.iterrows():
+                nome_grupo = df_grupos[df_grupos['id_grupo'] == row['id_grupo']]['nome_grupo'].values[0]
+                st.info(f"Convite para o grupo: **{nome_grupo}**")
+                if st.button(f"Aceitar {nome_grupo}", key=f"btn_acc_{idx}"):
+                    df_membros.at[idx, 'status'] = 'Ativo'
+                    salvar_dados(conn, df_membros, "Membros_Grupo")
+                    st.success("Convite aceito!")
+                    st.rerun()
+
+    with col2:
+        st.write("#### ➕ Criar Novo Grupo")
+        with st.form("form_novo_grupo", clear_on_submit=True):
+            nome_novo_grupo = st.text_input("Nome do Grupo (ex: Despesas de Casa)")
+            if st.form_submit_button("Criar Grupo"):
+                novo_id = str(uuid.uuid4())
+                novo_grupo = pd.DataFrame([{
+                    "id_grupo": novo_id, "nome_grupo": nome_novo_grupo, 
+                    "email_criador": email_logado, "data_criacao": str(date.today())
+                }])
+                novo_membro = pd.DataFrame([{
+                    "id_grupo": novo_id, "email_usuario": email_logado, "status": "Ativo"
+                }])
+                
+                salvar_dados(conn, pd.concat([df_grupos, novo_grupo], ignore_index=True), "Grupos")
+                salvar_dados(conn, pd.concat([df_membros, novo_membro], ignore_index=True), "Membros_Grupo")
+                st.success(f"Grupo '{nome_novo_grupo}' criado!")
+                st.rerun()
+
+    st.divider()
+    st.write("#### ✉️ Convidar Membro para seus Grupos")
+    meus_grupos_ids = df_grupos[df_grupos['email_criador'] == email_logado]['id_grupo'].tolist()
+    if meus_grupos_ids:
+        meus_grupos_nomes = df_grupos[df_grupos['id_grupo'].isin(meus_grupos_ids)]['nome_grupo'].tolist()
+        grupo_sel = st.selectbox("Selecione o grupo", meus_grupos_nomes)
+        id_grupo_sel = df_grupos[df_grupos['nome_grupo'] == grupo_sel]['id_grupo'].values[0]
         
-        if submit:
+        email_convidado = st.selectbox("E-mail do membro da família", df_usuarios[df_usuarios['email'] != email_logado]['email'].tolist())
+        
+        if st.button("Enviar Convite"):
+            # Verifica se já existe
+            existe = df_membros[(df_membros['id_grupo'] == id_grupo_sel) & (df_membros['email_usuario'] == email_convidado)]
+            if not existe.empty:
+                st.warning("Usuário já foi convidado ou é membro deste grupo.")
+            else:
+                novo_convite = pd.DataFrame([{"id_grupo": id_grupo_sel, "email_usuario": email_convidado, "status": "Pendente"}])
+                salvar_dados(conn, pd.concat([df_membros, novo_convite], ignore_index=True), "Membros_Grupo")
+                st.success("Convite enviado!")
+                st.rerun()
+    else:
+        st.info("Você precisa criar um grupo primeiro para convidar alguém.")
+
+def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email_logado):
+    st.markdown("### 📝 Registrar Movimentação")
+    
+    # Verifica grupos ativos do usuário
+    grupos_ativos_ids = df_membros[(df_membros['email_usuario'] == email_logado) & (df_membros['status'] == 'Ativo')]['id_grupo'].tolist()
+    grupos_ativos_df = df_grupos[df_grupos['id_grupo'].isin(grupos_ativos_ids)]
+
+    with st.form("form_lancamento", clear_on_submit=True):
+        tipo_selecionado = st.radio("Tipo:", TIPOS_LANCAMENTO, horizontal=True)
+        tipo = tipo_selecionado.split(" ")[1]
+        
+        col_escopo, col_grupo = st.columns(2)
+        with col_escopo:
+            escopo = st.radio("Quem pode ver/compartilhar esse registro?", ["👤 Meu Dinheiro (Privado)", "🏠 Dinheiro da Casa (Grupo)"])
+            escopo = "Privado" if "Meu Dinheiro" in escopo else "Grupo"
+            
+        with col_grupo:
+            id_grupo_selecionado = ""
+            if escopo == "Grupo":
+                if grupos_ativos_df.empty:
+                    st.error("Você não pertence a nenhum grupo. Crie ou aceite um convite primeiro.")
+                else:
+                    nome_grupo_sel = st.selectbox("Para qual Grupo?", grupos_ativos_df['nome_grupo'].tolist())
+                    id_grupo_selecionado = grupos_ativos_df[grupos_ativos_df['nome_grupo'] == nome_grupo_sel]['id_grupo'].values[0]
+
+        descricao = st.text_input("Descrição", placeholder="Ex: Conta de Luz, Mercado...")
+        categoria = st.selectbox("Categoria", CATEGORIAS_DESPESA if tipo == "Despesa" else CATEGORIAS_RECEITA if tipo == "Receita" else ["Reserva"])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1: valor = st.number_input("Valor (R$)", min_value=0.01, format="%.2f")
+        with col2: data_compra = st.date_input("Data")
+        with col3: parcelas = st.number_input("Parcelas", min_value=1, max_value=48, value=1)
+        
+        if st.form_submit_button("Salvar Registro", use_container_width=True):
             if not descricao:
-                st.warning("Informe a descrição.")
+                st.warning("Preencha a descrição!")
                 return
-            df_novas = calcular_parcelas(email_usuario, tipo_limpo, descricao, valor, data_compra, parcelas, categoria)
-            df_final = pd.concat([df_atual, df_novas], ignore_index=True)
+            if escopo == "Grupo" and not id_grupo_selecionado:
+                st.warning("Selecione um grupo válido.")
+                return
+
+            registros = []
+            valor_parcela = round(valor / parcelas, 2)
+            for i in range(parcelas):
+                registros.append({
+                    "id_transacao": str(uuid.uuid4()), "email_usuario": email_logado,
+                    "tipo": tipo, "escopo": escopo, "id_grupo": id_grupo_selecionado,
+                    "descricao": f"{descricao} ({i+1}/{parcelas})" if parcelas > 1 else descricao,
+                    "valor": valor_parcela, "data": data_compra + relativedelta(months=i),
+                    "parcela_atual": i + 1, "total_parcelas": parcelas, "categoria": categoria
+                })
+            
+            df_final = pd.concat([df_lancamentos, pd.DataFrame(registros)], ignore_index=True)
             salvar_dados(conn, df_final, "Lancamentos")
-            st.success(f"✅ {tipo_limpo} registrada com sucesso!")
+            st.success("✅ Registrado com sucesso!")
             st.rerun()
 
-def renderizar_aba_dashboard(df: pd.DataFrame, email_filtro: str, titulo: str = "Painel Financeiro"):
-    st.markdown(f"### 📊 {titulo}")
+def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, df_membros: pd.DataFrame, email_logado: str):
+    st.markdown("### 📊 Inteligência Financeira")
     
-    # Tratamento de tipagem
-    df['data'] = pd.to_datetime(df['data'], errors='coerce')
-    df['valor'] = pd.to_numeric(df['valor'], errors='coerce').fillna(0.0)
-    
-    df_user = df[df["email"] == email_filtro].copy()
-    if df_user.empty:
-        st.info("Nenhum registro encontrado neste perfil.")
+    if df_visivel.empty:
+        st.info("Nenhuma movimentação registrada no seu escopo de visão.")
         return
 
-    # CRIANDO DATAS NO PADRÃO BRASILEIRO E ORDENAÇÃO
-    df_user['periodo_ordenacao'] = df_user['data'].dt.to_period('M') # Usado para o código não se perder na ordem
-    df_user['mes_ano_br'] = df_user['data'].dt.strftime('%m/%Y')     # Usado para mostrar na tela (Ex: 04/2026)
+    # Preparação de Dados para Filtros
+    df_visivel['mes_ano'] = df_visivel['data'].dt.strftime('%m/%Y')
+    meses_disponiveis = df_visivel.sort_values('data', ascending=False)['mes_ano'].unique().tolist()
     
-    # === O NOVO FILTRO DE MÊS ===
-    # Descobre os meses únicos e organiza do mais recente para o mais antigo
-    meses_disponiveis = df_user['periodo_ordenacao'].drop_duplicates().sort_values(ascending=False)
-    lista_meses_opcoes = [p.strftime('%m/%Y') for p in meses_disponiveis if pd.notnull(p)]
+    # Identificar nomes dos grupos para o filtro amigável
+    mapa_grupos = dict(zip(df_grupos['id_grupo'], df_grupos['nome_grupo']))
     
-    mes_selecionado = st.selectbox("📅 Escolha o mês que deseja visualizar:", ["Todos os Meses"] + lista_meses_opcoes)
-    
-    # Aplica o filtro no banco de dados se não for "Todos"
-    if mes_selecionado != "Todos os Meses":
-        df_filtrado = df_user[df_user['mes_ano_br'] == mes_selecionado]
-        st.markdown(f"**Visualizando o resumo de: {mes_selecionado}**")
-    else:
-        df_filtrado = df_user
-        st.markdown("**Visualizando o histórico completo**")
-    # ==============================
-    
-    # Cálculos Inteligentes AGORA USAM O DF FILTRADO
-    total_receitas = df_filtrado[df_filtrado['tipo'] == 'Receita']['valor'].sum()
-    total_despesas = df_filtrado[df_filtrado['tipo'] == 'Despesa']['valor'].sum()
-    total_reservas = df_filtrado[df_filtrado['tipo'] == 'Reserva']['valor'].sum()
-    saldo_livre = total_receitas - total_despesas
+    # ------------------ FILTROS ------------------
+    st.markdown("#### Filtros de Visualização")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        mes_filtro = st.selectbox("Selecione o Mês:", ["Todos"] + meses_disponiveis)
+    with col_f2:
+        escopo_filtro = st.selectbox("Visão de Escopo:", ["Geral (Tudo)", "Apenas Meu Dinheiro (Privado)", "Apenas Dinheiro da Casa (Grupos)"])
 
-    # Exibição de Métricas (Grade 2x2 responsiva e sem cortar números)
-    col1, col2 = st.columns(2)
-    col1.metric("Entradas 🟢", f"R$ {total_receitas:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    col2.metric("Saídas 🔴", f"R$ {total_despesas:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    
-    col3, col4 = st.columns(2)
-    col3.metric("Saldo do Mês ⚖️", f"R$ {saldo_livre:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    col4.metric("Reservas 🔵", f"R$ {total_reservas:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    # Aplicando filtros
+    df_filtrado = df_visivel.copy()
+    if mes_filtro != "Todos":
+        df_filtrado = df_filtrado[df_filtrado['mes_ano'] == mes_filtro]
+        
+    if escopo_filtro == "Apenas Meu Dinheiro (Privado)":
+        df_filtrado = df_filtrado[(df_filtrado['escopo'] == 'Privado') & (df_filtrado['email_usuario'] == email_logado)]
+    elif escopo_filtro == "Apenas Dinheiro da Casa (Grupos)":
+        df_filtrado = df_filtrado[df_filtrado['escopo'] == 'Grupo']
+
+    if df_filtrado.empty:
+        st.warning("Nenhum dado encontrado para esta combinação de filtros.")
+        return
+
+    # ------------------ KPIS ------------------
+    t_rec = df_filtrado[df_filtrado['tipo'] == 'Receita']['valor'].sum()
+    t_desp = df_filtrado[df_filtrado['tipo'] == 'Despesa']['valor'].sum()
+    t_res = df_filtrado[df_filtrado['tipo'] == 'Reserva']['valor'].sum()
+    saldo = t_rec - t_desp
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Entradas", f"R$ {t_rec:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c2.metric("Saídas", f"R$ {t_desp:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c3.metric("Saldo Líquido", f"R$ {saldo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c4.metric("Guardado", f"R$ {t_res:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     
     st.divider()
 
-    col_graf1, col_graf2 = st.columns(2)
-    with col_graf1:
+    # ------------------ GRÁFICOS ------------------
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
         st.markdown("**Despesas por Categoria**")
-        df_despesas = df_filtrado[df_filtrado['tipo'] == 'Despesa']
-        if not df_despesas.empty:
-            df_cat = df_despesas.groupby("categoria", as_index=False)["valor"].sum()
-            fig_pizza = px.pie(df_cat, values='valor', names='categoria', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-            fig_pizza.update_layout(margin=dict(t=0, b=0, l=0, r=0))
-            st.plotly_chart(fig_pizza, use_container_width=True)
+        df_desp = df_filtrado[df_filtrado['tipo'] == 'Despesa']
+        if not df_desp.empty:
+            df_cat = df_desp.groupby("categoria", as_index=False)["valor"].sum()
+            fig_pie = px.pie(df_cat, values='valor', names='categoria', hole=0.4, 
+                             color_discrete_sequence=px.colors.sequential.RdBu)
+            fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig_pie, use_container_width=True)
         else:
-            st.info("Sem despesas para este período.")
+            st.info("Sem despesas registradas.")
 
-    with col_graf2:
-        st.markdown("**Fluxo de Caixa (Entradas vs Saídas)**")
+    with col_g2:
+        st.markdown("**Fluxo de Caixa no Tempo**")
         df_fluxo = df_filtrado[df_filtrado['tipo'].isin(['Receita', 'Despesa'])]
         if not df_fluxo.empty:
-            # Agrupa usando a ordenação real, mas plota com o texto brasileiro
-            df_mes = df_fluxo.groupby(["periodo_ordenacao", "mes_ano_br", "tipo"], as_index=False)["valor"].sum()
-            df_mes = df_mes.sort_values("periodo_ordenacao")
-            
-            fig_barras = px.bar(df_mes, x='mes_ano_br', y='valor', color='tipo', barmode='group',
-                                color_discrete_map={'Receita': '#2ca02c', 'Despesa': '#d62728'})
-            
-            fig_barras.update_xaxes(type='category') # Força o eixo X a respeitar o texto limpo
-            fig_barras.update_layout(margin=dict(t=0, b=0, l=0, r=0), yaxis_title=None, xaxis_title=None, legend_title=None)
-            st.plotly_chart(fig_barras, use_container_width=True)
+            df_tempo = df_fluxo.groupby(["mes_ano", "tipo"], as_index=False)["valor"].sum()
+            fig_bar = px.bar(df_tempo, x='mes_ano', y='valor', color='tipo', barmode='group',
+                             color_discrete_map={'Receita': '#2ca02c', 'Despesa': '#d62728'})
+            fig_bar.update_layout(margin=dict(t=0, b=0, l=0, r=0), yaxis_title="R$", xaxis_title="", legend_title=None)
+            st.plotly_chart(fig_bar, use_container_width=True)
         else:
-            st.info("Sem fluxo para este período.")
+            st.info("Sem fluxo registrado.")
 
-    st.markdown("**Histórico de Movimentações**")
-    df_view = df_filtrado[["data", "tipo", "descricao", "categoria", "valor"]].sort_values("data", ascending=False)
-    # Formata a data de cada linha para o padrão do Brasil (DD/MM/YYYY)
-    df_view['data'] = df_view['data'].dt.strftime('%d/%m/%Y')
-    df_view['valor'] = df_view.apply(lambda row: f"+ R$ {row['valor']:.2f}" if row['tipo'] in ['Receita', 'Reserva'] else f"- R$ {row['valor']:.2f}", axis=1)
-    
-    st.dataframe(df_view, hide_index=True, use_container_width=True)
+    # ------------------ TABELA DE DADOS ------------------
+    with st.expander("🔎 Ver Histórico Detalhado"):
+        df_display = df_filtrado[["data", "tipo", "escopo", "descricao", "categoria", "valor", "id_grupo"]].sort_values("data", ascending=False)
+        df_display['data'] = df_display['data'].dt.strftime('%d/%m/%Y')
+        df_display['valor'] = df_display.apply(lambda r: f"+ R$ {r['valor']:.2f}" if r['tipo'] in ['Receita', 'Reserva'] else f"- R$ {r['valor']:.2f}", axis=1)
+        # Mapear o nome do grupo se houver
+        df_display['Grupo'] = df_display['id_grupo'].map(mapa_grupos).fillna("Privado")
+        
+        st.dataframe(df_display[["data", "tipo", "escopo", "Grupo", "descricao", "categoria", "valor"]], 
+                     hide_index=True, use_container_width=True)
 
-def renderizar_configuracoes(conn: GSheetsConnection, df_usuarios: pd.DataFrame, username_logado: str):
-    st.markdown("### ⚙️ Quem pode ver seus dados?")
-    st.write("Escolha membros da família para permitir que eles acompanhem seus gastos.")
-    user_idx = df_usuarios.index[df_usuarios['username'] == username_logado].tolist()[0]
-    string_compartilhamento = str(df_usuarios.at[user_idx, 'compartilhado_com'])
-    lista_atual = [u.strip() for u in string_compartilhamento.split(',')] if string_compartilhamento else []
-    
-    outros_usuarios = df_usuarios[df_usuarios['username'] != username_logado]
-    opcoes = outros_usuarios['username'].tolist()
-    nomes_map = dict(zip(outros_usuarios['username'], outros_usuarios['nome']))
-    
-    selecionados = st.multiselect(
-        "Membros autorizados:", options=opcoes, default=[u for u in lista_atual if u in opcoes],
-        format_func=lambda x: nomes_map.get(x, x)
-    )
-    
-    if st.button("Salvar Permissões", use_container_width=True):
-        df_usuarios.at[user_idx, 'compartilhado_com'] = ",".join(selecionados)
-        salvar_dados(conn, df_usuarios, "Usuarios")
-        st.success("✅ Permissões atualizadas com sucesso!")
 
 # ==========================================
-# FLUXO PRINCIPAL (MAIN)
+# FLUXO PRINCIPAL DO APP
 # ==========================================
 def main():
     conn = get_connection()
+    
+    # 1. Carregamento de Dados (I/O)
     df_usuarios = carregar_tabela(conn, "Usuarios", COLUNAS_USUARIOS)
     
+    # 2. Configuração do Autenticador
     credentials = {"usernames": {}}
     for _, row in df_usuarios.iterrows():
         credentials["usernames"][row["username"]] = {
             "name": row["nome"], "email": row["email"], "password": row["senha_hash"]
         }
 
-    try: cookie_cfg = st.secrets["cookie"].to_dict()
-    except KeyError: st.stop()
+    try:
+        cookie_cfg = st.secrets["cookie"].to_dict()
+    except KeyError:
+        st.error("Configure os secrets do Streamlit (.streamlit/secrets.toml) para o cookie.")
+        st.stop()
 
     authenticator = stauth.Authenticate(
         credentials=credentials, cookie_name=cookie_cfg['name'],
         key=cookie_cfg['key'], cookie_expiry_days=cookie_cfg['expiry_days']
     )
 
+    # 3. Lógica de Login
     authenticator.login(location="main")
 
-    if st.session_state["authentication_status"]:
+    if st.session_state.get("authentication_status"):
+        # Dados do Usuário Logado
         username_logado = st.session_state["username"]
-        email_usuario = credentials["usernames"][username_logado]["email"]
-        nome_usuario = credentials["usernames"][username_logado]["name"]
-        
-        authenticator.logout("Sair", "sidebar")
-        st.sidebar.success(f"👋 Olá, {nome_usuario}!")
-        
+        user_info = df_usuarios[df_usuarios["username"] == username_logado].iloc[0]
+        email_logado = user_info["email"]
+        is_admin = str(user_info.get("is_admin", "NAO")).strip().upper() == "SIM"
+
+        # Carregar Tabelas Restantes do Banco
+        df_grupos = carregar_tabela(conn, "Grupos", COLUNAS_GRUPOS)
+        df_membros = carregar_tabela(conn, "Membros_Grupo", COLUNAS_MEMBROS)
         df_lancamentos = carregar_tabela(conn, "Lancamentos", COLUNAS_LANCAMENTOS)
+        
+        # Aplicar RLS na camada de dados
+        df_lancamentos_seguro = aplicar_rls(df_lancamentos, df_membros, email_logado)
 
-        usuarios_que_compartilharam = []
-        for _, row in df_usuarios.iterrows():
-            compartilhamentos = [u.strip() for u in str(row['compartilhado_com']).split(',')] if pd.notna(row['compartilhado_com']) else []
-            if username_logado in compartilhamentos:
-                usuarios_que_compartilharam.append({"nome": row["nome"], "email": row["email"]})
-
-        tabs_names = ["Lançar Dados", "Meu Dashboard"]
-        if usuarios_que_compartilharam: tabs_names.append("Visualizar Família")
-        tabs_names.append("⚙️ Configurações")
-
+        # Montagem do Layout
+        st.sidebar.success(f"👋 Olá, {user_info['nome']}!")
+        authenticator.logout("Sair", "sidebar")
+        
+        tabs_names = ["📝 Lançamentos", "📊 Dashboard", "🏠 Grupos & Família"]
+        if is_admin:
+            tabs_names.append("🛠️ Admin")
+            
         tabs = st.tabs(tabs_names)
 
-        with tabs[0]: renderizar_aba_lancamento(conn, df_lancamentos, email_usuario)
-        with tabs[1]: renderizar_aba_dashboard(df_lancamentos, email_usuario)
+        with tabs[0]: 
+            renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email_logado)
+        with tabs[1]: 
+            renderizar_aba_dashboard(df_lancamentos_seguro, df_grupos, df_membros, email_logado)
+        with tabs[2]: 
+            renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado)
         
-        aba_atual = 2
-        if usuarios_que_compartilharam:
-            with tabs[aba_atual]:
-                st.info("Estas pessoas liberaram o acesso para você.")
-                opcoes_map = {u["nome"]: u["email"] for u in usuarios_que_compartilharam}
-                pessoa_selecionada = st.selectbox("De quem você quer ver os dados?", list(opcoes_map.keys()))
-                if pessoa_selecionada:
-                    st.divider()
-                    renderizar_aba_dashboard(df_lancamentos, opcoes_map[pessoa_selecionada], f"Visão Geral: {pessoa_selecionada}")
-            aba_atual += 1
-            
-        with tabs[aba_atual]: renderizar_configuracoes(conn, df_usuarios, username_logado)
-            
-    elif st.session_state["authentication_status"] is False:
+        if is_admin:
+            with tabs[3]:
+                renderizar_aba_admin(conn, df_usuarios)
+
+    elif st.session_state.get("authentication_status") is False:
         st.error("❌ Usuário ou senha incorretos.")
         registrar_novo_usuario(conn, df_usuarios)
         
-    elif st.session_state["authentication_status"] is None:
+    elif st.session_state.get("authentication_status") is None:
         st.warning("🔒 Digite seu usuário e senha para entrar.")
         registrar_novo_usuario(conn, df_usuarios)
 
