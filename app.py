@@ -232,7 +232,7 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
         
         col1, col2, col3 = st.columns(3)
         with col1: valor = st.number_input("Valor Total (R$)", min_value=0.01, format="%.2f")
-        with col2: data_compra = st.date_input("Data do Ocorrido")
+        with col2: data_compra = st.date_input("Data do Ocorrido", format="DD/MM/YYYY")
         with col3: parcelas = st.number_input("Dividir em Parcelas?", min_value=1, max_value=48, value=1)
         
         if st.form_submit_button("Salvar Registro", use_container_width=True):
