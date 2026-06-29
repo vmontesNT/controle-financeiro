@@ -288,14 +288,18 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_ca
                     nome_grupo_sel = st.selectbox("Para qual Cofre?", grupos_ativos_df['nome_grupo'].tolist())
                     id_grupo_selecionado = grupos_ativos_df[grupos_ativos_df['nome_grupo'] == nome_grupo_sel]['id_grupo'].values[0]
 
-        # IDEIA 1: Integração de Forma de Pagamento e Seleção de Cartões
+# IDEIA 1: Integração de Forma de Pagamento e Seleção de Cartões
         col_f_pago, col_cartao_sel = st.columns(2)
         with col_f_pago:
-            forma_pagamento = st.selectbox("Forma de Pagamento:", ["💵 Dinheiro / PIX", "💳 Cartão de Crédito"]) if tipo == "Despesa" else "💵 Dinheiro / PIX"
+            # Desacoplamos a restrição. Agora 'Receita' (Vendas) e 'Despesa' habilitam a seleção de Cartão.
+            if tipo in ["Despesa", "Receita"]:
+                forma_pagamento = st.selectbox("Forma de Movimentação:", ["💵 Dinheiro / PIX", "💳 Cartão de Crédito"])
+            else:
+                forma_pagamento = "💵 Dinheiro / PIX" # Reservas continuam sendo tratadas como liquidez imediata
             
         with col_cartao_sel:
             id_cartao_selecionado = ""
-            if forma_pagamento == "💳 Cartão de Crédito" and tipo == "Despesa":
+            if forma_pagamento == "💳 Cartão de Crédito":
                 if meus_cartoes_df.empty:
                     st.error("Nenhum cartão cadastrado. Vá em '💳 Meus Cartões' antes de lançar.")
                 else:
@@ -321,7 +325,8 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_ca
             if escopo == "Grupo" and not id_grupo_selecionado:
                 st.warning("Selecione um cofre válido.")
                 return
-            if forma_pagamento == "💳 Cartão de Crédito" and not id_cartao_selecionado and tipo == "Despesa":
+            # Validação ajustada para não depender de 'tipo == Despesa'
+            if forma_pagamento == "💳 Cartão de Crédito" and not id_cartao_selecionado:
                 st.warning("Selecione um cartão de crédito válido.")
                 return
 
@@ -334,7 +339,8 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_ca
                     "descricao": f"{descricao} ({i+1}/{parcelas})" if parcelas > 1 else descricao,
                     "valor": valor_parcela, "data": data_compra + relativedelta(months=i),
                     "parcela_atual": i + 1, "total_parcelas": parcelas, "categoria": categoria,
-                    "id_cartao": id_cartao_selecionado if tipo == "Despesa" else ""
+                    # Atribuição independente do tipo da transação
+                    "id_cartao": id_cartao_selecionado if forma_pagamento == "💳 Cartão de Crédito" else "" 
                 })
             
             df_final = pd.concat([df_lancamentos, pd.DataFrame(registros)], ignore_index=True)
