@@ -16,7 +16,6 @@ st.set_page_config(page_title="Finanças em Família", page_icon="💰", layout=
 
 TIPOS_LANCAMENTO = ["🔴 Despesa", "🟢 Receita", "🔵 Reserva"]
 
-# NOVAS CATEGORIAS GRANULARES
 CATEGORIAS_DESPESA = [
     "Mercado", "Farmácia", "Aluguel", "Condomínio", "Conta de Luz", 
     "Conta de Água", "Gás", "Internet / Telefone", "Transporte / Combustível", 
@@ -28,9 +27,12 @@ CATEGORIAS_RESERVA = ["Cofrinho / Poupança", "Reserva de Emergência", "Investi
 COLUNAS_USUARIOS = ["email", "username", "nome", "senha_hash", "is_admin"]
 COLUNAS_GRUPOS = ["id_grupo", "nome_grupo", "email_criador", "data_criacao"]
 COLUNAS_MEMBROS = ["id_grupo", "email_usuario", "status"]
+COLUNAS_CARTOES = ["id_cartao", "email_usuario", "nome_cartao", "quatro_digitos", "dia_fechamento", "tipo_cartao"]
+
+# Nova coluna 'id_cartao' acoplada ao final da tabela de lançamentos
 COLUNAS_LANCAMENTOS = [
     "id_transacao", "email_usuario", "tipo", "escopo", "id_grupo",
-    "descricao", "valor", "data", "parcela_atual", "total_parcelas", "categoria"
+    "descricao", "valor", "data", "parcela_atual", "total_parcelas", "categoria", "id_cartao"
 ]
 
 # ==========================================
@@ -78,6 +80,7 @@ def aplicar_rls(df_lancamentos: pd.DataFrame, df_membros: pd.DataFrame, email_lo
     df_seguro = df_lancamentos[mascara].copy()
     df_seguro['data'] = pd.to_datetime(df_seguro['data'], errors='coerce')
     df_seguro['valor'] = pd.to_numeric(df_seguro['valor'], errors='coerce').fillna(0.0)
+    df_seguro['id_cartao'] = df_seguro['id_cartao'].fillna("")
     
     return df_seguro
 
@@ -89,7 +92,6 @@ def registrar_novo_usuario(conn: GSheetsConnection, df_usuarios: pd.DataFrame):
     with st.expander("🆕 Não tem uma conta? Cadastre-se aqui"):
         with st.form("form_registro", clear_on_submit=True):
             novo_nome = st.text_input("Qual o seu nome?")
-            # UX: Removido o campo username, focando apenas no E-mail
             novo_email = st.text_input("Seu E-mail (Este será seu login)").strip().lower()
             nova_senha = st.text_input("Crie uma Senha", type="password")
             confirmar_senha = st.text_input("Confirme a Senha", type="password")
@@ -111,11 +113,8 @@ def registrar_novo_usuario(conn: GSheetsConnection, df_usuarios: pd.DataFrame):
                 senha_criptografada = credenciais_temp["usernames"]["temp"]["password"]
                 
                 novo_registro = pd.DataFrame([{
-                    "email": novo_email, 
-                    "username": novo_email, # Preenchemos username com email para integridade da tabela
-                    "nome": novo_nome,
-                    "senha_hash": senha_criptografada, 
-                    "is_admin": "NAO"
+                    "email": novo_email, "username": novo_email, "nome": novo_nome,
+                    "senha_hash": senha_criptografada, "is_admin": "NAO"
                 }])
                 
                 df_final = pd.concat([df_usuarios, novo_registro], ignore_index=True)
@@ -144,6 +143,53 @@ def renderizar_aba_admin(conn, df_usuarios):
         st.success(f"✅ Senha alterada com sucesso!")
         st.warning(f"Envie esta senha temporária para o usuário via WhatsApp: **{nova_senha}**")
 
+def renderizar_aba_cartoes(conn, df_cartoes, email_logado):
+    st.markdown("### 💳 Gerenciar Meus Cartões de Crédito")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("#### ➕ Cadastrar Novo Cartão")
+        with st.form("form_novo_cartao", clear_on_submit=True):
+            nome_cartao = st.text_input("Nome do Cartão (ex: Nubank Roxo, Visa Prime)")
+            quatro_digitos = st.text_input("4 Dígitos Finais (Opcional)", max_chars=4, placeholder="1234")
+            dia_fechamento = st.number_input("Dia de Fechamento da Fatura (1 a 31)", min_value=1, max_value=31, value=10)
+            tipo_cartao = st.selectbox("Tipo de Cartão", ["Físico", "Virtual"])
+            
+            if st.form_submit_button("Cadastrar Cartão", use_container_width=True):
+                if not nome_cartao:
+                    st.warning("Informe o nome do cartão.")
+                    return
+                
+                novo_id = str(uuid.uuid4())
+                novo_registro = pd.DataFrame([{
+                    "id_cartao": novo_id, "email_usuario": email_logado, "nome_cartao": nome_cartao,
+                    "quatro_digitos": quatro_digitos if quatro_digitos else "N/A",
+                    "dia_fechamento": int(dia_fechamento), "tipo_cartao": tipo_cartao
+                }])
+                
+                df_final = pd.concat([df_cartoes, novo_registro], ignore_index=True)
+                salvar_dados(conn, df_final, "Cartoes")
+                st.success(f"Cartão {nome_cartao} cadastrado!")
+                st.rerun()
+                
+    with col2:
+        st.write("#### 📋 Meus Cartões Ativos")
+        meus_cartoes = df_cartoes[df_cartoes['email_usuario'] == email_logado]
+        if meus_cartoes.empty:
+            st.info("Você ainda não possui cartões cadastrados.")
+        else:
+            for idx, row in meus_cartoes.iterrows():
+                with st.container():
+                    st.markdown(f"**{row['nome_cartao']}** ({row['tipo_cartao']})")
+                    st.caption(f"Dígitos: {row['quatro_digitos']} | Melhor dia de compra (Fechamento): Dia {row['dia_fechamento']}")
+                    if st.button(f"Remover {row['nome_cartao']}", key=f"del_card_{row['id_cartao']}"):
+                        df_final = df_cartoes[df_cartoes['id_cartao'] != row['id_cartao']]
+                        salvar_dados(conn, df_final, "Cartoes")
+                        st.success("Cartão removido!")
+                        st.rerun()
+                    st.divider()
+
 def renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado):
     st.markdown("### 🏠 Minha Família e Grupos")
     col1, col2 = st.columns(2)
@@ -160,6 +206,23 @@ def renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado
                     df_membros.at[idx, 'status'] = 'Ativo'
                     salvar_dados(conn, df_membros, "Membros_Grupo")
                     st.success("Convite aceito!")
+                    st.rerun()
+
+        st.write("#### ⚙️ Gerenciar e Excluir Meus Grupos")
+        meus_grupos_criados = df_grupos[df_grupos['email_criador'] == email_logado]
+        if meus_grupos_criados.empty:
+            st.caption("Você não criou nenhum grupo ainda.")
+        else:
+            for idx, row in meus_grupos_criados.iterrows():
+                col_txt, col_del = st.columns([3, 1])
+                col_txt.markdown(f"🏠 **{row['nome_grupo']}**")
+                # IDEIA 2 CONCLUÍDA: Opção de exclusão segura apenas para o criador
+                if col_del.button("Excluir", key=f"del_g_{row['id_grupo']}", type="secondary", use_container_width=True):
+                    df_g_final = df_grupos[df_grupos['id_grupo'] != row['id_grupo']]
+                    df_m_final = df_membros[df_membros['id_grupo'] != row['id_grupo']]
+                    salvar_dados(conn, df_g_final, "Grupos")
+                    salvar_dados(conn, df_m_final, "Membros_Grupo")
+                    st.success(f"Grupo '{row['nome_grupo']}' e seus membros foram excluídos!")
                     st.rerun()
 
     with col2:
@@ -199,13 +262,14 @@ def renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado
     else:
         st.info("Você precisa criar um cofre primeiro para convidar alguém.")
 
-def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email_logado):
+def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_cartoes, email_logado):
     st.markdown("### 📝 Registrar Movimentação")
     
     grupos_ativos_ids = df_membros[(df_membros['email_usuario'] == email_logado) & (df_membros['status'] == 'Ativo')]['id_grupo'].tolist()
     grupos_ativos_df = df_grupos[df_grupos['id_grupo'].isin(grupos_ativos_ids)]
+    
+    meus_cartoes_df = df_cartoes[df_cartoes['email_usuario'] == email_logado]
 
-    # ARQUITETURA CORRIGIDA: O 'Tipo' sai do formulário para forçar a atualização da tela em tempo real
     tipo_selecionado = st.radio("Tipo da Movimentação:", TIPOS_LANCAMENTO, horizontal=True)
     tipo = tipo_selecionado.split(" ")[1]
 
@@ -224,6 +288,20 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
                     nome_grupo_sel = st.selectbox("Para qual Cofre?", grupos_ativos_df['nome_grupo'].tolist())
                     id_grupo_selecionado = grupos_ativos_df[grupos_ativos_df['nome_grupo'] == nome_grupo_sel]['id_grupo'].values[0]
 
+        # IDEIA 1: Integração de Forma de Pagamento e Seleção de Cartões
+        col_f_pago, col_cartao_sel = st.columns(2)
+        with col_f_pago:
+            forma_pagamento = st.selectbox("Forma de Pagamento:", ["💵 Dinheiro / PIX", "💳 Cartão de Crédito"]) if tipo == "Despesa" else "💵 Dinheiro / PIX"
+            
+        with col_cartao_sel:
+            id_cartao_selecionado = ""
+            if forma_pagamento == "💳 Cartão de Crédito" and tipo == "Despesa":
+                if meus_cartoes_df.empty:
+                    st.error("Nenhum cartão cadastrado. Vá em '💳 Meus Cartões' antes de lançar.")
+                else:
+                    cartao_nome_sel = st.selectbox("Selecione o Cartão:", meus_cartoes_df['nome_cartao'].tolist())
+                    id_cartao_selecionado = meus_cartoes_df[meus_cartoes_df['nome_cartao'] == cartao_nome_sel]['id_cartao'].values[0]
+
         col_cat, col_desc = st.columns(2)
         with col_cat:
             categoria_lista = CATEGORIAS_DESPESA if tipo == "Despesa" else CATEGORIAS_RECEITA if tipo == "Receita" else CATEGORIAS_RESERVA
@@ -233,7 +311,7 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
         
         col1, col2, col3 = st.columns(3)
         with col1: valor = st.number_input("Valor Total (R$)", min_value=0.01, format="%.2f")
-        with col2: data_compra = st.date_input("Data do Ocorrido", format="DD/MM/YYYY") # Mantendo o ajuste BR que fizemos
+        with col2: data_compra = st.date_input("Data do Ocorrido", format="DD/MM/YYYY")
         with col3: parcelas = st.number_input("Dividir em Parcelas?", min_value=1, max_value=48, value=1)
         
         if st.form_submit_button("Salvar Registro", use_container_width=True):
@@ -242,6 +320,9 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
                 return
             if escopo == "Grupo" and not id_grupo_selecionado:
                 st.warning("Selecione um cofre válido.")
+                return
+            if forma_pagamento == "💳 Cartão de Crédito" and not id_cartao_selecionado and tipo == "Despesa":
+                st.warning("Selecione um cartão de crédito válido.")
                 return
 
             registros = []
@@ -252,7 +333,8 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
                     "tipo": tipo, "escopo": escopo, "id_grupo": id_grupo_selecionado,
                     "descricao": f"{descricao} ({i+1}/{parcelas})" if parcelas > 1 else descricao,
                     "valor": valor_parcela, "data": data_compra + relativedelta(months=i),
-                    "parcela_atual": i + 1, "total_parcelas": parcelas, "categoria": categoria
+                    "parcela_atual": i + 1, "total_parcelas": parcelas, "categoria": categoria,
+                    "id_cartao": id_cartao_selecionado if tipo == "Despesa" else ""
                 })
             
             df_final = pd.concat([df_lancamentos, pd.DataFrame(registros)], ignore_index=True)
@@ -260,25 +342,39 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email
             st.success("✅ Registrado com sucesso!")
             st.rerun()
 
-def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, df_membros: pd.DataFrame, email_logado: str):
+def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, df_cartoes: pd.DataFrame, email_logado: str):
     st.markdown("### 📊 Inteligência Financeira")
     
     if df_visivel.empty:
         st.info("Nenhuma movimentação registrada no seu escopo de visão.")
         return
 
-    df_visivel['mes_ano'] = df_visivel['data'].dt.strftime('%m/%Y')
-    meses_disponiveis = df_visivel.sort_values('data', ascending=False)['mes_ano'].unique().tolist()
+    # IDEIA 1 CONCLUÍDA: Algoritmo de cruzamento em memória para cálculo do Mês de Fatura (Competência Real)
+    df_processado = df_visivel.merge(df_cartoes[['id_cartao', 'dia_fechamento']], on='id_cartao', how='left')
+    df_processado['dia_fechamento'] = pd.to_numeric(df_processado['dia_fechamento']).fillna(0).astype(int)
+    
+    def calcular_competencia(row):
+        data_original = row['data']
+        dia_fechamento = row['dia_fechamento']
+        
+        # Se foi no cartão e o dia da compra é MAIOR ou IGUAL ao fechamento, joga para a próxima fatura
+        if dia_fechamento > 0 and data_original.day >= dia_fechamento:
+            return (data_original + relativedelta(months=1)).strftime('%m/%Y')
+        return data_original.strftime('%m/%Y')
+
+    df_processado['mes_ano'] = df_processado.apply(calcular_competencia, axis=1)
+    meses_disponiveis = df_processado.sort_values('data', ascending=False)['mes_ano'].unique().tolist()
     mapa_grupos = dict(zip(df_grupos['id_grupo'], df_grupos['nome_grupo']))
+    mapa_cartoes = dict(zip(df_cartoes['id_cartao'], df_cartoes['nome_cartao']))
     
     # FILTROS
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        mes_filtro = st.selectbox("📅 Período:", ["Todos os Meses"] + meses_disponiveis)
+        mes_filtro = st.selectbox("📅 Período (Mês da Fatura/Competência):", ["Todos os Meses"] + meses_disponiveis)
     with col_f2:
         escopo_filtro = st.selectbox("👁️ Visão de Escopo:", ["Geral (Tudo)", "Apenas Meu Dinheiro (Privado)", "Apenas Dinheiro da Casa (Cofres)"])
 
-    df_filtrado = df_visivel.copy()
+    df_filtrado = df_processado.copy()
     if mes_filtro != "Todos os Meses":
         df_filtrado = df_filtrado[df_filtrado['mes_ano'] == mes_filtro]
         
@@ -321,7 +417,7 @@ def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, 
             st.info("Sem despesas registradas.")
 
     with col_g2:
-        st.markdown("**Fluxo de Caixa no Tempo**")
+        st.markdown("**Fluxo de Caixa por Competência**")
         df_fluxo = df_filtrado[df_filtrado['tipo'].isin(['Receita', 'Despesa'])]
         if not df_fluxo.empty:
             df_tempo = df_fluxo.groupby(["mes_ano", "tipo"], as_index=False)["valor"].sum()
@@ -334,12 +430,14 @@ def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, 
 
     # TABELA DE DADOS
     with st.expander("🔎 Ver Histórico Detalhado (Tabela)"):
-        df_display = df_filtrado[["data", "tipo", "escopo", "descricao", "categoria", "valor", "id_grupo"]].sort_values("data", ascending=False)
-        df_display['data'] = df_display['data'].dt.strftime('%d/%m/%Y')
-        df_display['valor'] = df_display.apply(lambda r: f"+ R$ {r['valor']:.2f}" if r['tipo'] in ['Receita', 'Reserva'] else f"- R$ {r['valor']:.2f}", axis=1)
+        df_display = df_filtrado.copy()
+        df_display = df_display.sort_values("data", ascending=False)
+        df_display['data_formatada'] = df_display['data'].dt.strftime('%d/%m/%Y')
+        df_display['valor_formatado'] = df_display.apply(lambda r: f"+ R$ {r['valor']:.2f}" if r['tipo'] in ['Receita', 'Reserva'] else f"- R$ {r['valor']:.2f}", axis=1)
         df_display['Cofre'] = df_display['id_grupo'].map(mapa_grupos).fillna("Privado")
+        df_display['Cartão Usado'] = df_display['id_cartao'].map(mapa_cartoes).fillna("Dinheiro / PIX")
         
-        st.dataframe(df_display[["data", "tipo", "escopo", "Cofre", "categoria", "descricao", "valor"]], 
+        st.dataframe(df_display[["data_formatada", "tipo", "escopo", "Cofre", "Cartão Usado", "categoria", "descricao", "valor_formatado"]], 
                      hide_index=True, use_container_width=True)
 
 # ==========================================
@@ -351,7 +449,6 @@ def main():
     
     credentials = {"usernames": {}}
     for _, row in df_usuarios.iterrows():
-        # ARQUITETURA: Mapeando o e-mail como a chave mestre de login para o Authenticator
         credentials["usernames"][row["email"]] = {
             "name": row["nome"], "email": row["email"], "password": row["senha_hash"]
         }
@@ -367,39 +464,39 @@ def main():
         key=cookie_cfg['key'], cookie_expiry_days=cookie_cfg['expiry_days']
     )
 
-    # Injeção de dica de UI para avisar o usuário que o Username é o Email
     st.markdown("<style>#login-form label:first-of-type { visibility: hidden; position: relative; } #login-form label:first-of-type::after { visibility: visible; position: absolute; top: 0; left: 0; content: 'E-mail (Seu Login)'; color: #fafafa; }</style>", unsafe_allow_html=True)
     
     authenticator.login(location="main")
 
     if st.session_state.get("authentication_status"):
-        email_logado = st.session_state["username"] # Agora recebe o e-mail
+        email_logado = st.session_state["username"]
         user_info = df_usuarios[df_usuarios["email"] == email_logado].iloc[0]
         is_admin = str(user_info.get("is_admin", "NAO")).strip().upper() == "SIM"
 
         df_grupos = carregar_tabela(conn, "Grupos", COLUNAS_GRUPOS)
         df_membros = carregar_tabela(conn, "Membros_Grupo", COLUNAS_MEMBROS)
+        df_cartoes = carregar_tabela(conn, "Cartoes", COLUNAS_CARTOES)
         df_lancamentos = carregar_tabela(conn, "Lancamentos", COLUNAS_LANCAMENTOS)
         
         df_lancamentos_seguro = aplicar_rls(df_lancamentos, df_membros, email_logado)
 
-        # ==========================================
-        # NOVO MENU LATERAL RESPONSIVO (SIDEBAR)
-        # ==========================================
         st.sidebar.success(f"👋 Olá, {user_info['nome']}!")
         authenticator.logout("Sair", "sidebar")
         st.sidebar.markdown("---")
         
-        abas_disponiveis = ["📝 Lançamentos", "📊 Dashboard", "🏠 Grupos & Família"]
+        # Adição da seção de Cartões diretamente no menu de navegação responsivo
+        abas_disponiveis = ["📝 Lançamentos", "📊 Dashboard", "💳 Meus Cartões", "🏠 Grupos & Família"]
         if is_admin:
             abas_disponiveis.append("🛠️ Admin")
             
         menu_selecionado = st.sidebar.radio("Menu de Navegação", abas_disponiveis)
 
         if menu_selecionado == "📝 Lançamentos":
-            renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, email_logado)
+            renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_cartoes, email_logado)
         elif menu_selecionado == "📊 Dashboard":
-            renderizar_aba_dashboard(df_lancamentos_seguro, df_grupos, df_membros, email_logado)
+            renderizar_aba_dashboard(df_lancamentos_seguro, df_grupos, df_cartoes, email_logado)
+        elif menu_selecionado == "💳 Meus Cartões":
+            renderizar_aba_cartoes(conn, df_cartoes, email_logado)
         elif menu_selecionado == "🏠 Grupos & Família":
             renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado)
         elif menu_selecionado == "🛠️ Admin" and is_admin:
