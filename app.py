@@ -9,9 +9,7 @@ from dateutil.relativedelta import relativedelta
 from streamlit_gsheets import GSheetsConnection
 import streamlit_authenticator as stauth
 
-# ==========================================
 # CONFIGURAÇÕES DA PÁGINA E CONSTANTES
-# ==========================================
 st.set_page_config(page_title="Finanças em Família", page_icon="💰", layout="wide")
 
 TIPOS_LANCAMENTO = ["🔴 Despesa", "🟢 Receita", "🔵 Reserva"]
@@ -35,9 +33,7 @@ COLUNAS_LANCAMENTOS = [
     "descricao", "valor", "data", "parcela_atual", "total_parcelas", "categoria", "id_cartao"
 ]
 
-# ==========================================
 # CAMADA DE DADOS E CONEXÃO (I/O)
-# ==========================================
 @st.cache_resource
 def get_connection() -> GSheetsConnection:
     return st.connection("gsheets", type=GSheetsConnection)
@@ -60,9 +56,7 @@ def salvar_dados(conn: GSheetsConnection, df: pd.DataFrame, nome_aba: str) -> No
     except Exception as e:
         st.error(f"Erro crítico ao salvar em {nome_aba}: {e}")
 
-# ==========================================
 # LÓGICA DE NEGÓCIO E SEGURANÇA (CORE)
-# ==========================================
 def aplicar_rls(df_lancamentos: pd.DataFrame, df_membros: pd.DataFrame, email_logado: str) -> pd.DataFrame:
     if df_lancamentos.empty:
         return df_lancamentos
@@ -122,9 +116,7 @@ def registrar_novo_usuario(conn: GSheetsConnection, df_usuarios: pd.DataFrame):
                 st.success("✅ Conta criada! Suba a página e faça login com seu E-mail.")
                 st.rerun()
 
-# ==========================================
 # COMPONENTES DE UI
-# ==========================================
 def renderizar_aba_admin(conn, df_usuarios):
     st.markdown("### 🛠️ Painel de Administração")
     st.write("#### Redefinir Senha de Usuários")
@@ -265,47 +257,48 @@ def renderizar_aba_grupos(conn, df_grupos, df_membros, df_usuarios, email_logado
 def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_cartoes, email_logado):
     st.markdown("### 📝 Registrar Movimentação")
     
+    # 1. Consultas de Estado no Banco de Dados
     grupos_ativos_ids = df_membros[(df_membros['email_usuario'] == email_logado) & (df_membros['status'] == 'Ativo')]['id_grupo'].tolist()
     grupos_ativos_df = df_grupos[df_grupos['id_grupo'].isin(grupos_ativos_ids)]
-    
     meus_cartoes_df = df_cartoes[df_cartoes['email_usuario'] == email_logado]
 
-    tipo_selecionado = st.radio("Tipo da Movimentação:", TIPOS_LANCAMENTO, horizontal=True)
-    tipo = tipo_selecionado.split(" ")[1]
+    # CORREÇÃO CRÍTICA: Controladores fora do Form para reatividade instantânea
+    col_t, col_f = st.columns(2)
+    with col_t:
+        tipo_selecionado = st.radio("Tipo da Movimentação:", TIPOS_LANCAMENTO, horizontal=True)
+        tipo = tipo_selecionado.split(" ")[1]
+
+    with col_f:
+        if tipo in ["Despesa", "Receita"]:
+            forma_pagamento = st.selectbox("Forma de Movimentação:", ["💵 Dinheiro / PIX", "💳 Cartão de Crédito"])
+        else:
+            forma_pagamento = "💵 Dinheiro / PIX"
 
     with st.form("form_lancamento", clear_on_submit=True):
-        col_escopo, col_grupo = st.columns(2)
-        with col_escopo:
-            escopo = st.radio("De onde saiu/entrou este dinheiro?", ["👤 Meu Dinheiro (Privado)", "🏠 Dinheiro da Casa (Cofre Compartilhado)"])
-            escopo = "Privado" if "Meu Dinheiro" in escopo else "Grupo"
-            
-        with col_grupo:
-            id_grupo_selecionado = ""
-            if escopo == "Grupo":
-                if grupos_ativos_df.empty:
-                    st.error("Você não pertence a nenhum grupo. Vá em 'Grupos & Família' primeiro.")
-                else:
+        
+        id_grupo_selecionado = ""
+        if grupos_ativos_df.empty:
+            escopo = "Privado"
+        else:
+            col_escopo, col_grupo = st.columns(2)
+            with col_escopo:
+                escopo_label = st.radio("De onde saiu/entrou este dinheiro?", ["👤 Meu Dinheiro (Privado)", "🏠 Dinheiro da Casa (Cofre Compartilhado)"])
+                escopo = "Privado" if "Meu Dinheiro" in escopo_label else "Grupo"
+                
+            with col_grupo:
+                if escopo == "Grupo":
                     nome_grupo_sel = st.selectbox("Para qual Cofre?", grupos_ativos_df['nome_grupo'].tolist())
                     id_grupo_selecionado = grupos_ativos_df[grupos_ativos_df['nome_grupo'] == nome_grupo_sel]['id_grupo'].values[0]
 
-# IDEIA 1: Integração de Forma de Pagamento e Seleção de Cartões
-        col_f_pago, col_cartao_sel = st.columns(2)
-        with col_f_pago:
-            # Desacoplamos a restrição. Agora 'Receita' (Vendas) e 'Despesa' habilitam a seleção de Cartão.
-            if tipo in ["Despesa", "Receita"]:
-                forma_pagamento = st.selectbox("Forma de Movimentação:", ["💵 Dinheiro / PIX", "💳 Cartão de Crédito"])
+        id_cartao_selecionado = ""
+        if forma_pagamento == "💳 Cartão de Crédito":
+            if meus_cartoes_df.empty:
+                st.error("Nenhum cartão cadastrado. Vá em '💳 Meus Cartões' antes de lançar.")
             else:
-                forma_pagamento = "💵 Dinheiro / PIX" # Reservas continuam sendo tratadas como liquidez imediata
-            
-        with col_cartao_sel:
-            id_cartao_selecionado = ""
-            if forma_pagamento == "💳 Cartão de Crédito":
-                if meus_cartoes_df.empty:
-                    st.error("Nenhum cartão cadastrado. Vá em '💳 Meus Cartões' antes de lançar.")
-                else:
-                    cartao_nome_sel = st.selectbox("Selecione o Cartão:", meus_cartoes_df['nome_cartao'].tolist())
-                    id_cartao_selecionado = meus_cartoes_df[meus_cartoes_df['nome_cartao'] == cartao_nome_sel]['id_cartao'].values[0]
+                cartao_nome_sel = st.selectbox("Selecione o Cartão:", meus_cartoes_df['nome_cartao'].tolist())
+                id_cartao_selecionado = meus_cartoes_df[meus_cartoes_df['nome_cartao'] == cartao_nome_sel]['id_cartao'].values[0]
 
+        # Restante dos campos do formulário
         col_cat, col_desc = st.columns(2)
         with col_cat:
             categoria_lista = CATEGORIAS_DESPESA if tipo == "Despesa" else CATEGORIAS_RECEITA if tipo == "Receita" else CATEGORIAS_RESERVA
@@ -318,6 +311,7 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_ca
         with col2: data_compra = st.date_input("Data do Ocorrido", format="DD/MM/YYYY")
         with col3: parcelas = st.number_input("Dividir em Parcelas?", min_value=1, max_value=48, value=1)
         
+        # Pipeline de Validação e Salvamento
         if st.form_submit_button("Salvar Registro", use_container_width=True):
             if not descricao:
                 st.warning("Preencha a descrição específica.")
@@ -325,7 +319,6 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_ca
             if escopo == "Grupo" and not id_grupo_selecionado:
                 st.warning("Selecione um cofre válido.")
                 return
-            # Validação ajustada para não depender de 'tipo == Despesa'
             if forma_pagamento == "💳 Cartão de Crédito" and not id_cartao_selecionado:
                 st.warning("Selecione um cartão de crédito válido.")
                 return
@@ -334,13 +327,18 @@ def renderizar_aba_lancamento(conn, df_lancamentos, df_grupos, df_membros, df_ca
             valor_parcela = round(valor / parcelas, 2)
             for i in range(parcelas):
                 registros.append({
-                    "id_transacao": str(uuid.uuid4()), "email_usuario": email_logado,
-                    "tipo": tipo, "escopo": escopo, "id_grupo": id_grupo_selecionado,
+                    "id_transacao": str(uuid.uuid4()), 
+                    "email_usuario": email_logado,
+                    "tipo": tipo, 
+                    "escopo": escopo, 
+                    "id_grupo": id_grupo_selecionado,
                     "descricao": f"{descricao} ({i+1}/{parcelas})" if parcelas > 1 else descricao,
-                    "valor": valor_parcela, "data": data_compra + relativedelta(months=i),
-                    "parcela_atual": i + 1, "total_parcelas": parcelas, "categoria": categoria,
-                    # Atribuição independente do tipo da transação
-                    "id_cartao": id_cartao_selecionado if forma_pagamento == "💳 Cartão de Crédito" else "" 
+                    "valor": valor_parcela, 
+                    "data": data_compra + relativedelta(months=i),
+                    "parcela_atual": i + 1, 
+                    "total_parcelas": parcelas, 
+                    "categoria": categoria,
+                    "id_cartao": id_cartao_selecionado if forma_pagamento == "💳 Cartão de Crédito" else ""
                 })
             
             df_final = pd.concat([df_lancamentos, pd.DataFrame(registros)], ignore_index=True)
@@ -355,7 +353,6 @@ def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, 
         st.info("Nenhuma movimentação registrada no seu escopo de visão.")
         return
 
-    # IDEIA 1 CONCLUÍDA: Algoritmo de cruzamento em memória para cálculo do Mês de Fatura (Competência Real)
     df_processado = df_visivel.merge(df_cartoes[['id_cartao', 'dia_fechamento']], on='id_cartao', how='left')
     df_processado['dia_fechamento'] = pd.to_numeric(df_processado['dia_fechamento']).fillna(0).astype(int)
     
@@ -446,9 +443,7 @@ def renderizar_aba_dashboard(df_visivel: pd.DataFrame, df_grupos: pd.DataFrame, 
         st.dataframe(df_display[["data_formatada", "tipo", "escopo", "Cofre", "Cartão Usado", "categoria", "descricao", "valor_formatado"]], 
                      hide_index=True, use_container_width=True)
 
-# ==========================================
 # FLUXO PRINCIPAL DO APP
-# ==========================================
 def main():
     conn = get_connection()
     df_usuarios = carregar_tabela(conn, "Usuarios", COLUNAS_USUARIOS)
